@@ -3,12 +3,12 @@
 
 // ==== KHAI BÁO CHÂN ====
 const int SW1 = 23, SW2 = 22, SW3 = 21, SW4 = 19, SW5 = 18, SW6 = 5, SW7 = 17;
-const int FAN = 16, OXI = 4, MSP = 0, MRTA = 2, MAY_BOM_VAO = 15, MAY_BOM_RA = 32;
+const int FAN = 16, OXI = 4, MSP = 0, MRTA = 2, MAY_BOM_VAO = 15, MAY_BOM_RA = 32, LED = 33;
 
 #define PH_PIN 25
 #define LDR 36
 
-//Phần này dành cho cảm biến mức nước 
+//Phần này dành cho cảm biến mức nước
 #define sensorPower 27
 #define sensorPin 34
 int val = 0;
@@ -72,22 +72,26 @@ void connectFirebase() {
 }
 
 // === Hàm kiểm tra nút nhấn đơn giản ===
-void ButtonCheck(int& buttonState, int& lastState, int pinSW, int& status, const char* path) {
+bool ButtonCheck(int& buttonState, int& lastState, int pinSW, int& status) {
   buttonState = digitalRead(pinSW);
   if (buttonState == LOW && lastState == HIGH) {
     status = !status;
-    Serial.printf("%s %s (Từ nút nhấn)\n", path, status ? "BẬT" : "TẮT");
-
-    if (Firebase.ready() && signUpOK) {
-      String statusStr = status ? "1" : "0";
-      if (Firebase.RTDB.setString(&fbdo, path, statusStr)) {
-        Serial.printf(" Gửi %s = %s lên Firebase thành công\n", path, statusStr.c_str());
-      } else {
-        Serial.println(" Gửi Firebase thất bại: " + String(fbdo.errorReason().c_str()));
-      }
-    }
+    lastState = buttonState;
+    return true;  // Có thay đổi trạng thái
   }
   lastState = buttonState;
+  return false;  // Không thay đổi
+}
+
+void Send_data_button_by_firrebase(const char* path, int status) {
+  if (Firebase.ready() && signUpOK) {
+    String statusStr = status ? "1" : "0";
+    if (Firebase.RTDB.setString(&fbdo, path, statusStr)) {
+      Serial.printf("Gửi %s = %s lên Firebase thành công\n", path, statusStr.c_str());
+    } else {
+      Serial.println("Gửi Firebase thất bại: " + String(fbdo.errorReason().c_str()));
+    }
+  }
 }
 
 
@@ -112,33 +116,36 @@ void readFirebaseData() {
     if (Firebase.RTDB.getString(&fbdo, "Control/MAY_BOM_RA")) {
       Status6 = fbdo.stringData().toInt();
     }
+    if (Firebase.RTDB.getString(&fbdo, "Control/LED")) {
+      Status7 = fbdo.stringData().toInt();
+    }
   }
 }
 
 // === Đọc giá trị cảm biến mức nước ===
-float water_sensor(){
+float water_sensor() {
   float level = readSensor();
-  level = (level/1450.0) * 100.0;
+  level = (level / 1450.0) * 100.0;
   return level;
 }
 
 int readSensor() {
-    digitalWrite(sensorPower, HIGH);    
-    delay(10);                 
-    val = analogRead(sensorPin);        
-    digitalWrite(sensorPower, LOW);        
-    return val;                 
+  digitalWrite(sensorPower, HIGH);
+  delay(10);
+  val = analogRead(sensorPin);
+  digitalWrite(sensorPower, LOW);
+  return val;
 }
 
 // === Đọc giá trị cảm biến pH ===
 float readPH() {
-    int rawValue = analogRead(PH_PIN);  
-    float voltage = (rawValue / 4095.0) * 3.3; 
-    return 7 + ((2.50 - voltage) / 0.18);  
+  int rawValue = analogRead(PH_PIN);
+  float voltage = (rawValue / 4095.0) * 3.3;
+  return 7 + ((2.50 - voltage) / 0.18);
 }
 
 // === Đọc giá trị cảm biến ánh sáng ===
-int LDR_Cal(){
+int LDR_Cal() {
   int ldr;
   return ldr = analogRead(LDR);
 }
@@ -153,7 +160,7 @@ void setup() {
   pinMode(SW5, INPUT_PULLUP);
   pinMode(SW6, INPUT_PULLUP);
   pinMode(SW7, INPUT_PULLUP);
-  pinMode(LDR, INPUT); 
+  pinMode(LDR, INPUT);
   pinMode(PH_PIN, INPUT);
 
   pinMode(FAN, OUTPUT);
@@ -163,6 +170,7 @@ void setup() {
   pinMode(MAY_BOM_VAO, OUTPUT);
   pinMode(MAY_BOM_RA, OUTPUT);
   pinMode(sensorPower, OUTPUT);
+  pinMode(LED, OUTPUT);
 
   digitalWrite(FAN, LOW);
   digitalWrite(OXI, LOW);
@@ -171,6 +179,7 @@ void setup() {
   digitalWrite(MAY_BOM_VAO, LOW);
   digitalWrite(MAY_BOM_RA, LOW);
   digitalWrite(sensorPower, LOW);
+  digitalWrite(LED, LOW);
 
   connectWiFi();
   connectFirebase();
@@ -180,30 +189,47 @@ void loop() {
   unsigned long now1 = millis();
   unsigned long now2 = millis();
 
-  if(now1 - prevReadFirebase >FirebaseControl){
+  if (now1 - prevReadFirebase > FirebaseControl) {
     // Kiểm tra nút nhấn và cập nhật trạng thái
-    ButtonCheck(buttonState1, lastButtonState1, SW1, Status1, "Control/FAN");
+    if (ButtonCheck(buttonState1, lastButtonState1, SW1, Status1)) {
+      Send_data_button_by_firrebase("Control/FAN", Status1);
+    }
     digitalWrite(FAN, Status1);
 
-    ButtonCheck(buttonState2, lastButtonState2, SW2, Status2, "Control/OXI");
+    if (ButtonCheck(buttonState2, lastButtonState2, SW2, Status2)) {
+      Send_data_button_by_firrebase("Control/OXI", Status2);
+    }
     digitalWrite(OXI, Status2);
 
-    ButtonCheck(buttonState3, lastButtonState3, SW3, Status3, "Control/MSP");
+    if (ButtonCheck(buttonState3, lastButtonState3, SW3, Status3)) {
+      Send_data_button_by_firrebase("Control/MSP", Status3);
+    }
     digitalWrite(MSP, Status3);
 
-    ButtonCheck(buttonState4, lastButtonState4, SW4, Status4, "Control/MRTA");
+    if (ButtonCheck(buttonState4, lastButtonState4, SW4, Status4)) {
+      Send_data_button_by_firrebase("Control/MRTA", Status4);
+    }
     digitalWrite(MRTA, Status4);
 
-    ButtonCheck(buttonState5, lastButtonState5, SW5, Status5, "Control/MAY_BOM_VAO");
+    if (ButtonCheck(buttonState5, lastButtonState5, SW5, Status5)) {
+      Send_data_button_by_firrebase("Control/MAY_BOM_VAO", Status5);
+    }
     digitalWrite(MAY_BOM_VAO, Status5);
 
-    ButtonCheck(buttonState6, lastButtonState6, SW6, Status6, "Control/MAY_BOM_RA");
+    if (ButtonCheck(buttonState6, lastButtonState6, SW6, Status6)) {
+      Send_data_button_by_firrebase("Control/MAY_BOM_RA", Status6);
+    }
     digitalWrite(MAY_BOM_RA, Status6);
+
+    if (ButtonCheck(buttonState7, lastButtonState7, SW7, Status7)) {
+      Send_data_button_by_firrebase("Control/LED", Status7);
+    }
+    digitalWrite(LED, Status7);
 
     readFirebaseData();
     prevReadFirebase = now1;
   }
-  if(now2 - prevReadSensor >FirebaseSensor){
+  if (now2 - prevReadSensor > FirebaseSensor) {
     float phValue = readPH();
     if (Firebase.ready() && signUpOK) {
       Firebase.RTDB.setFloat(&fbdo, "Sensor/pH", phValue);
@@ -221,7 +247,7 @@ void loop() {
       Serial.println(waterLevel);
       Firebase.RTDB.setFloat(&fbdo, "Sensor/Water_Level", waterLevel);
       Serial.printf("Đã gửi Mức nước: %.2f %%\n", waterLevel);
-      }
-      prevReadSensor = now2;
     }
+    prevReadSensor = now2;
   }
+}
