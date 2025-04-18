@@ -1,27 +1,29 @@
 #include <WiFi.h>
 #include <Firebase_ESP_Client.h>
 
-// ==== KHAI BÁO CHÂN ====
-const int SW1 = 23, SW2 = 22, SW3 = 21, SW4 = 19, SW5 = 18, SW6 = 5, SW7 = 17;
-const int FAN = 16, OXI = 4, MSP = 0, MRTA = 2, MAY_BOM_VAO = 15, MAY_BOM_RA = 32, LED = 33;
+// ==== Khai báo các chân nút nhấn ====
+#define SW1 23
+#define SW2 22
+#define SW3 21
+#define SW4 19
+#define SW5 18
+#define SW6 5
+#define SW7 17
 
+// ==== Khai báo các chân thiết bị ====
+#define FAN 16
+#define OXI 4
+#define MSP 0
+#define MRTA 2
+#define MAY_BOM_VAO 15
+#define MAY_BOM_RA 32
+#define LED 33
+
+// ==== Cảm biến analog ====
 #define PH_PIN 25
 #define LDR 36
-
-//Phần này dành cho cảm biến mức nước
 #define sensorPower 27
 #define sensorPin 34
-int val = 0;
-
-
-// === === === === === === === === === === === === ===
-int lastButtonState1 = HIGH, buttonState1 = HIGH, Status1 = 0;
-int lastButtonState2 = HIGH, buttonState2 = HIGH, Status2 = 0;
-int lastButtonState3 = HIGH, buttonState3 = HIGH, Status3 = 0;
-int lastButtonState4 = HIGH, buttonState4 = HIGH, Status4 = 0;
-int lastButtonState5 = HIGH, buttonState5 = HIGH, Status5 = 0;
-int lastButtonState6 = HIGH, buttonState6 = HIGH, Status6 = 0;
-int lastButtonState7 = HIGH, buttonState7 = HIGH, Status7 = 0;
 
 // ==== WiFi & Firebase ====
 const char* WIFI_SSID = "Trieu Ninh";
@@ -29,41 +31,58 @@ const char* WIFI_PASS = "12344321";
 const char* API_KEY = "AIzaSyCicNauI0OCVjFMnEpFBqm0OjfhL8TcUNg";
 const char* DATABASE_URL = "https://nckh-8e369-default-rtdb.firebaseio.com/";
 
-FirebaseData fbdo;
+// ==== Firebase Khai báo ====
+FirebaseData fbdo_sensor;   // Dùng cho cảm biến
+FirebaseData fbdo_control;  // Dùng cho điều khiển
+
 FirebaseAuth auth;
 FirebaseConfig config;
+
 bool signUpOK = false;
 
-unsigned long prevReadFirebase = 0;
-unsigned long prevReadSensor = 0;
-const unsigned long FirebaseControl = 1000;
-const unsigned long FirebaseSensor = 1500;
+// ==== Nút & thiết bị ====
+const int BUTTONS = 7;
+const int buttonPins[BUTTONS] = {SW1, SW2, SW3, SW4, SW5, SW6, SW7};
+const int Control[BUTTONS] = {FAN, OXI, MSP, MRTA, MAY_BOM_VAO, MAY_BOM_RA, LED};
+const char* firebasePaths[BUTTONS] = {
+  "Control/FAN", "Control/OXI", "Control/MSP",
+  "Control/MRTA", "Control/MAY_BOM_VAO", "Control/MAY_BOM_RA", "Control/LED"
+};
 
+// ==== Trạng thái ====
+volatile bool buttonFlags[BUTTONS] = {false};
+bool status[BUTTONS] = {false};
+unsigned long lastDebounceTime[BUTTONS] = {0};
+const unsigned long debounceDelay = 50;
+
+// ==== Token Callback ====
 void tokenStatusCallback(token_info_t info) {
   if (info.status == token_status_error) {
     Serial.println("Lỗi token: " + String(info.error.message.c_str()));
   }
 }
 
+// ==== Kết nối WiFi ====
 void connectWiFi() {
   WiFi.begin(WIFI_SSID, WIFI_PASS);
-  Serial.print("Đang kết nối WiFi");
+  Serial.print("Kết nối WiFi");
   while (WiFi.status() != WL_CONNECTED) {
     Serial.print(".");
     delay(300);
   }
-  Serial.println("\n Đã kết nối WiFi!");
+  Serial.println("\nĐã kết nối WiFi!");
 }
 
+// ==== Kết nối Firebase ====
 void connectFirebase() {
   config.api_key = API_KEY;
   config.database_url = DATABASE_URL;
 
   if (Firebase.signUp(&config, &auth, "", "")) {
-    Serial.println(" Đăng ký Firebase thành công!");
+    Serial.println("Firebase đăng ký thành công!");
     signUpOK = true;
   } else {
-    Serial.println(" Lỗi đăng ký Firebase: " + String(config.signer.signupError.message.c_str()));
+    Serial.println("Firebase lỗi: " + String(config.signer.signupError.message.c_str()));
   }
 
   config.token_status_callback = tokenStatusCallback;
@@ -71,183 +90,127 @@ void connectFirebase() {
   Firebase.reconnectWiFi(true);
 }
 
-// === Hàm kiểm tra nút nhấn đơn giản ===
-bool ButtonCheck(int& buttonState, int& lastState, int pinSW, int& status) {
-  buttonState = digitalRead(pinSW);
-  if (buttonState == LOW && lastState == HIGH) {
-    status = !status;
-    lastState = buttonState;
-    return true;  // Có thay đổi trạng thái
-  }
-  lastState = buttonState;
-  return false;  // Không thay đổi
-}
-
-void Send_data_button_by_firrebase(const char* path, int status) {
+// ==== Gửi trạng thái thiết bị ====
+void Send_data_button_by_firebase(const char* path, bool state) {
   if (Firebase.ready() && signUpOK) {
-    String statusStr = status ? "1" : "0";
-    if (Firebase.RTDB.setString(&fbdo, path, statusStr)) {
-      Serial.printf("Gửi %s = %s lên Firebase thành công\n", path, statusStr.c_str());
+    String value = state ? "1" : "0";
+    if (Firebase.RTDB.setString(&fbdo_control, path, value)) {
+      Serial.println("Đã gửi: " + String(path) + " = " + value);
     } else {
-      Serial.println("Gửi Firebase thất bại: " + String(fbdo.errorReason().c_str()));
+      Serial.println("Gửi thất bại: " + fbdo_control.errorReason());
     }
   }
 }
 
-
-// === Đọc dữ liệu điều khiển từ Firebase ===
-void readFirebaseData() {
+// ==== Nhận dữ liệu từ Firebase ====
+void Read_Data_By_Firebase() {
   if (Firebase.ready() && signUpOK) {
-    if (Firebase.RTDB.getString(&fbdo, "Control/FAN")) {
-      Status1 = fbdo.stringData().toInt();
-    }
-    if (Firebase.RTDB.getString(&fbdo, "Control/OXI")) {
-      Status2 = fbdo.stringData().toInt();
-    }
-    if (Firebase.RTDB.getString(&fbdo, "Control/MSP")) {
-      Status3 = fbdo.stringData().toInt();
-    }
-    if (Firebase.RTDB.getString(&fbdo, "Control/MRTA")) {
-      Status4 = fbdo.stringData().toInt();
-    }
-    if (Firebase.RTDB.getString(&fbdo, "Control/MAY_BOM_VAO")) {
-      Status5 = fbdo.stringData().toInt();
-    }
-    if (Firebase.RTDB.getString(&fbdo, "Control/MAY_BOM_RA")) {
-      Status6 = fbdo.stringData().toInt();
-    }
-    if (Firebase.RTDB.getString(&fbdo, "Control/LED")) {
-      Status7 = fbdo.stringData().toInt();
+    for (int i = 0; i < BUTTONS; i++) {
+      String path = firebasePaths[i];
+      if (Firebase.RTDB.getString(&fbdo_control, path)) {
+        String value = fbdo_control.stringData();
+        bool newState = (value == "1");
+
+        if (status[i] != newState) {
+          status[i] = newState;
+          digitalWrite(Control[i], status[i]);
+          Serial.printf("Firebase điều khiển => Thiết bị %d: %s\n", i + 1, status[i] ? "ON" : "OFF");
+
+          Send_data_button_by_firebase(path.c_str(), status[i]); // Cập nhật lại Firebase để đồng bộ
+          buttonFlags[i] = false; // Reset flag tránh trùng lặp
+        }
+      } else {
+        Serial.println("Lỗi đọc Firebase: " + fbdo_control.errorReason());
+      }
     }
   }
 }
 
-// === Đọc giá trị cảm biến mức nước ===
+// ==== Đọc cảm biến nước ====
 float water_sensor() {
-  float level = readSensor();
-  level = (level / 1450.0) * 100.0;
-  return level;
-}
-
-int readSensor() {
   digitalWrite(sensorPower, HIGH);
-  delay(10);
-  val = analogRead(sensorPin);
+  delay(1000);
+  int val = analogRead(sensorPin);
   digitalWrite(sensorPower, LOW);
-  return val;
+  return (val / 1450.0) * 100.0;
 }
 
-// === Đọc giá trị cảm biến pH ===
+// ==== Đọc cảm biến pH ====
 float readPH() {
-  int rawValue = analogRead(PH_PIN);
-  float voltage = (rawValue / 4095.0) * 3.3;
+  int raw = analogRead(PH_PIN);
+  float voltage = (raw / 4095.0) * 3.3;
   return 7 + ((2.50 - voltage) / 0.18);
 }
 
-// === Đọc giá trị cảm biến ánh sáng ===
+// ==== Đọc ánh sáng ====
 int LDR_Cal() {
-  int ldr;
-  return ldr = analogRead(LDR);
+  return analogRead(LDR);
 }
 
+// ==== Ngắt nút nhấn ====
+void IRAM_ATTR handleButton0() { buttonFlags[0] = true; }
+void IRAM_ATTR handleButton1() { buttonFlags[1] = true; }
+void IRAM_ATTR handleButton2() { buttonFlags[2] = true; }
+void IRAM_ATTR handleButton3() { buttonFlags[3] = true; }
+void IRAM_ATTR handleButton4() { buttonFlags[4] = true; }
+void IRAM_ATTR handleButton5() { buttonFlags[5] = true; }
+void IRAM_ATTR handleButton6() { buttonFlags[6] = true; }
+
+// ==== SETUP ====
 void setup() {
   Serial.begin(115200);
-
-  pinMode(SW1, INPUT_PULLUP);
-  pinMode(SW2, INPUT_PULLUP);
-  pinMode(SW3, INPUT_PULLUP);
-  pinMode(SW4, INPUT_PULLUP);
-  pinMode(SW5, INPUT_PULLUP);
-  pinMode(SW6, INPUT_PULLUP);
-  pinMode(SW7, INPUT_PULLUP);
-  pinMode(LDR, INPUT);
-  pinMode(PH_PIN, INPUT);
-
-  pinMode(FAN, OUTPUT);
-  pinMode(OXI, OUTPUT);
-  pinMode(MSP, OUTPUT);
-  pinMode(MRTA, OUTPUT);
-  pinMode(MAY_BOM_VAO, OUTPUT);
-  pinMode(MAY_BOM_RA, OUTPUT);
-  pinMode(sensorPower, OUTPUT);
-  pinMode(LED, OUTPUT);
-
-  digitalWrite(FAN, LOW);
-  digitalWrite(OXI, LOW);
-  digitalWrite(MSP, LOW);
-  digitalWrite(MRTA, LOW);
-  digitalWrite(MAY_BOM_VAO, LOW);
-  digitalWrite(MAY_BOM_RA, LOW);
-  digitalWrite(sensorPower, LOW);
-  digitalWrite(LED, LOW);
-
   connectWiFi();
   connectFirebase();
+
+  for (int i = 0; i < BUTTONS; i++) {
+    pinMode(buttonPins[i], INPUT_PULLUP);
+    pinMode(Control[i], OUTPUT);
+    digitalWrite(Control[i], LOW);
+  }
+
+  pinMode(sensorPower, OUTPUT);
+  digitalWrite(sensorPower, LOW);
+
+  attachInterrupt(digitalPinToInterrupt(SW1), handleButton0, FALLING);
+  attachInterrupt(digitalPinToInterrupt(SW2), handleButton1, FALLING);
+  attachInterrupt(digitalPinToInterrupt(SW3), handleButton2, FALLING);
+  attachInterrupt(digitalPinToInterrupt(SW4), handleButton3, FALLING);
+  attachInterrupt(digitalPinToInterrupt(SW5), handleButton4, FALLING);
+  attachInterrupt(digitalPinToInterrupt(SW6), handleButton5, FALLING);
+  attachInterrupt(digitalPinToInterrupt(SW7), handleButton6, FALLING);
 }
 
+// ==== LOOP ====
 void loop() {
-  unsigned long now1 = millis();
-  unsigned long now2 = millis();
+  unsigned long now = millis();
 
-  if (now1 - prevReadFirebase > FirebaseControl) {
-    // Kiểm tra nút nhấn và cập nhật trạng thái
-    if (ButtonCheck(buttonState1, lastButtonState1, SW1, Status1)) {
-      Send_data_button_by_firrebase("Control/FAN", Status1);
+  // Xử lý nút nhấn
+  for (int i = 0; i < BUTTONS; i++) {
+    if (buttonFlags[i] && (now - lastDebounceTime[i] > debounceDelay)) {
+      lastDebounceTime[i] = now;
+      buttonFlags[i] = false;
+      status[i] = !status[i];
+      digitalWrite(Control[i], status[i]);
+      Send_data_button_by_firebase(firebasePaths[i], status[i]);
+      Serial.printf("Nút %d nhấn => Thiết bị: %s\n", i + 1, status[i] ? "ON" : "OFF");
     }
-    digitalWrite(FAN, Status1);
-
-    if (ButtonCheck(buttonState2, lastButtonState2, SW2, Status2)) {
-      Send_data_button_by_firrebase("Control/OXI", Status2);
-    }
-    digitalWrite(OXI, Status2);
-
-    if (ButtonCheck(buttonState3, lastButtonState3, SW3, Status3)) {
-      Send_data_button_by_firrebase("Control/MSP", Status3);
-    }
-    digitalWrite(MSP, Status3);
-
-    if (ButtonCheck(buttonState4, lastButtonState4, SW4, Status4)) {
-      Send_data_button_by_firrebase("Control/MRTA", Status4);
-    }
-    digitalWrite(MRTA, Status4);
-
-    if (ButtonCheck(buttonState5, lastButtonState5, SW5, Status5)) {
-      Send_data_button_by_firrebase("Control/MAY_BOM_VAO", Status5);
-    }
-    digitalWrite(MAY_BOM_VAO, Status5);
-
-    if (ButtonCheck(buttonState6, lastButtonState6, SW6, Status6)) {
-      Send_data_button_by_firrebase("Control/MAY_BOM_RA", Status6);
-    }
-    digitalWrite(MAY_BOM_RA, Status6);
-
-    if (ButtonCheck(buttonState7, lastButtonState7, SW7, Status7)) {
-      Send_data_button_by_firrebase("Control/LED", Status7);
-    }
-    digitalWrite(LED, Status7);
-
-    readFirebaseData();
-    prevReadFirebase = now1;
   }
-  if (now2 - prevReadSensor > FirebaseSensor) {
-    float phValue = readPH();
-    if (Firebase.ready() && signUpOK) {
-      Firebase.RTDB.setFloat(&fbdo, "Sensor/pH", phValue);
-      Serial.printf("Đã gửi pH: %.2f\n", phValue);
-    }
 
-    int lightValue = LDR_Cal();
-    if (Firebase.ready() && signUpOK) {
-      Firebase.RTDB.setInt(&fbdo, "Sensor/Light", lightValue);
-      Serial.printf("Đã gửi Ánh sáng: %d\n", lightValue);
-    }
+  // Gửi cảm biến mỗi 5s
+  static unsigned long lastSensorTime = 0;
+  if (now - lastSensorTime > 5000) {
+    lastSensorTime = now;
+    float pH = readPH();
+    int light = LDR_Cal();
+    float water = water_sensor();
 
-    float waterLevel = water_sensor();
-    if (Firebase.ready() && signUpOK) {
-      Serial.println(waterLevel);
-      Firebase.RTDB.setFloat(&fbdo, "Sensor/Water_Level", waterLevel);
-      Serial.printf("Đã gửi Mức nước: %.2f %%\n", waterLevel);
-    }
-    prevReadSensor = now2;
+    Firebase.RTDB.setFloat(&fbdo_sensor, "Sensor/pH", pH);
+    Firebase.RTDB.setInt(&fbdo_sensor, "Sensor/Light", light);
+    Firebase.RTDB.setFloat(&fbdo_sensor, "Sensor/Water", water);
+
+    Serial.printf("Sensor => pH: %.2f | Light: %d | Water: %.2f%%\n", pH, light, water);
   }
+
+  // Nhận trạng thái từ Firebase
+  Read_Data_By_Firebase();
 }
