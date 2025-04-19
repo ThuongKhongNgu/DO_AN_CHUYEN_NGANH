@@ -1,5 +1,6 @@
 #include <WiFi.h>
 #include <Firebase_ESP_Client.h>
+#include <time.h>
 
 // ==== Khai báo các chân nút nhấn ====
 #define SW1 23
@@ -46,9 +47,25 @@ const char* DATABASE_URL = "https://nckh-8e369-default-rtdb.firebaseio.com/";
 // ==== Firebase Khai báo ====
 FirebaseData fbdo_sensor;
 FirebaseData fbdo_control;
+FirebaseData fbdo_time;
 FirebaseAuth auth;
 FirebaseConfig config;
 bool signUpOK = false;
+
+// ==== Biến thời gian từ Firebase, nếu k lấy đc real time thì lấy giá trị này ====
+String MSP_Start = "06:00";
+String MSP_Stop = "06:20";
+
+String FAN_Start = "05:00";
+String FAN_Stop = "08:00";
+
+String OXI_Start = "05:00";
+String OXI_Stop = "08:40";
+
+// ==== Đánh dấu đã chạy ====
+int Run_MSP_ON = -1, Run_MSP_OFF = -1;
+int Run_FAN_ON = -1, Run_FAN_OFF = -1;
+int Run_OXI_ON = -1, Run_OXI_OFF = -1;
 
 // ==== Nút & thiết bị ====
 const int BUTTONS = 7;
@@ -94,6 +111,35 @@ void connectFirebase() {
   config.token_status_callback = tokenStatusCallback;
   Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(true);
+}
+
+// ==== Tách chuỗi "HH:MM" ====
+void splitTime(String timeStr, int &hour, int &minute) {
+  hour = timeStr.substring(0, 2).toInt();
+  minute = timeStr.substring(3, 5).toInt();
+}
+
+// ==== Đọc thời gian từ Firebase ====
+void getFirebaseSchedule() {
+  if (Firebase.RTDB.getString(&fbdo_time, "/Daily/MSP/Start")) MSP_Start = fbdo_time.stringData();
+  if (Firebase.RTDB.getString(&fbdo_time, "/Daily/MSP/Stop"))  MSP_Stop  = fbdo_time.stringData();
+  if (Firebase.RTDB.getString(&fbdo_time, "/Daily/FAN/Start")) FAN_Start = fbdo_time.stringData();
+  if (Firebase.RTDB.getString(&fbdo_time, "/Daily/FAN/Stop"))  FAN_Stop  = fbdo_time.stringData();
+  if (Firebase.RTDB.getString(&fbdo_time, "/Daily/OXI/Start")) OXI_Start = fbdo_time.stringData();
+  if (Firebase.RTDB.getString(&fbdo_time, "/Daily/OXI/Stop"))  OXI_Stop  = fbdo_time.stringData();
+}
+
+void syncTime() {
+  configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+  Serial.println("🕒 Chờ đồng bộ thời gian...");
+  
+  time_t now = time(nullptr);
+  while (now < 24 * 3600) {
+    delay(200);
+    now = time(nullptr);
+  }
+
+  Serial.println("✅ Đã đồng bộ thời gian.");
 }
 
 void Send_data_button_by_firebase(const char* path, bool state) {
@@ -249,6 +295,7 @@ void setup() {
   Serial.begin(115200);
   connectWiFi();
   connectFirebase();
+  syncTime();
 
   for (int i = 0; i < BUTTONS; i++) {
     pinMode(buttonPins[i], INPUT_PULLUP);
@@ -272,6 +319,8 @@ void setup() {
 // ==== LOOP ====
 void loop() {
   unsigned long now = millis();
+  unsigned long lastDailyTaskCheck = 0; // Thời điểm lần cuối kiểm tra Daily Task
+  const unsigned long dailyTaskInterval = 60000; // 60 giây
 
   // Xử lý nút nhấn
   for (int i = 0; i < BUTTONS; i++) {
@@ -308,4 +357,80 @@ void loop() {
 
   // Nhận trạng thái Firebase
   Read_Data_By_Firebase();
+
+  // ==== Hiển thị thời gian hiện tại ====
+  time_t timer = time(nullptr);
+  struct tm timeinfo;
+  localtime_r(&timer, &timeinfo);
+  Serial.printf("⏰ %02d:%02d:%02d | %02d-%02d-%04d\n",
+    timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
+    timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900);
+
+  // ==== Lấy thời gian điều khiển từ Firebase ====
+  getFirebaseSchedule();
+
+  // ==== Điều khiển MSP ====
+  int mspOnHour, mspOnMin, mspOffHour, mspOffMin;
+  splitTime(MSP_Start, mspOnHour, mspOnMin);
+  splitTime(MSP_Stop, mspOffHour, mspOffMin);
+
+  if (timeinfo.tm_hour == mspOnHour && timeinfo.tm_min == mspOnMin && Run_MSP_ON != timeinfo.tm_mday) {
+    digitalWrite(MSP, HIGH);
+    status[2] = true;
+    Send_data_button_by_firebase("Control/MSP", true);
+    Run_MSP_ON = timeinfo.tm_mday;
+    Serial.println("⏱️ MSP ON theo lịch");
+  }
+
+  if (timeinfo.tm_hour == mspOffHour && timeinfo.tm_min == mspOffMin && Run_MSP_OFF != timeinfo.tm_mday) {
+    digitalWrite(MSP, LOW);
+    status[2] = false;
+    Send_data_button_by_firebase("Control/MSP", false);
+    Run_MSP_OFF = timeinfo.tm_mday;
+    Serial.println("⏱️ MSP OFF theo lịch");
+  }
+
+  // ==== Điều khiển FAN ====
+  int fanOnHour, fanOnMin, fanOffHour, fanOffMin;
+  splitTime(FAN_Start, fanOnHour, fanOnMin);
+  splitTime(FAN_Stop, fanOffHour, fanOffMin);
+
+  if (timeinfo.tm_hour == fanOnHour && timeinfo.tm_min == fanOnMin && Run_FAN_ON != timeinfo.tm_mday) {
+    digitalWrite(FAN, HIGH);
+    status[0] = true;
+    Send_data_button_by_firebase("Control/FAN", true);
+    Run_FAN_ON = timeinfo.tm_mday;
+    Serial.println("⏱️ FAN ON theo lịch");
+  }
+
+  if (timeinfo.tm_hour == fanOffHour && timeinfo.tm_min == fanOffMin && Run_FAN_OFF != timeinfo.tm_mday) {
+    digitalWrite(FAN, LOW);
+    status[0] = false;
+    Send_data_button_by_firebase("Control/FAN", false);
+    Run_FAN_OFF = timeinfo.tm_mday;
+    Serial.println("⏱️ FAN OFF theo lịch");
+  }
+
+  // ==== Điều khiển OXI ====
+  int oxiOnHour, oxiOnMin, oxiOffHour, oxiOffMin;
+  splitTime(OXI_Start, oxiOnHour, oxiOnMin);
+  splitTime(OXI_Stop, oxiOffHour, oxiOffMin);
+
+  if (timeinfo.tm_hour == oxiOnHour && timeinfo.tm_min == oxiOnMin && Run_OXI_ON != timeinfo.tm_mday) {
+    digitalWrite(OXI, HIGH);
+    status[1] = true;
+    Send_data_button_by_firebase("Control/OXI", true);
+    Run_OXI_ON = timeinfo.tm_mday;
+    Serial.println("⏱️ OXI ON theo lịch");
+  }
+
+  if (timeinfo.tm_hour == oxiOffHour && timeinfo.tm_min == oxiOffMin && Run_OXI_OFF != timeinfo.tm_mday) {
+    digitalWrite(OXI, LOW);
+    status[1] = false;
+    Send_data_button_by_firebase("Control/OXI", false);
+    Run_OXI_OFF = timeinfo.tm_mday;
+    Serial.println("⏱️ OXI OFF theo lịch");
+  }
+
+  delay(1000); // Chờ 1 giây rồi lặp lại vòng loop
 }
