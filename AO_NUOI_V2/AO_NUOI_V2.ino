@@ -34,9 +34,13 @@ float temp = 28.0;
 #define sensorPower 27
 #define sensorPin 34
 
+// ==== Trạng thái ====
 bool may_bom_vao_on = false;
 bool may_bom_ra_on = false;
 bool den_ao_nuoi_on = false;
+
+// ==== Biến lưu hàm millis ====
+unsigned long now = millis();
 
 // ==== WiFi & Firebase ====
 const char* WIFI_SSID = "Trieu Ninh";
@@ -47,25 +51,9 @@ const char* DATABASE_URL = "https://nckh-8e369-default-rtdb.firebaseio.com/";
 // ==== Firebase Khai báo ====
 FirebaseData fbdo_sensor;
 FirebaseData fbdo_control;
-FirebaseData fbdo_time;
 FirebaseAuth auth;
 FirebaseConfig config;
 bool signUpOK = false;
-
-// ==== Biến thời gian từ Firebase, nếu k lấy đc real time thì lấy giá trị này ====
-String MSP_Start = "06:00";
-String MSP_Stop = "06:20";
-
-String FAN_Start = "05:00";
-String FAN_Stop = "08:00";
-
-String OXI_Start = "05:00";
-String OXI_Stop = "08:40";
-
-// ==== Đánh dấu đã chạy ====
-int Run_MSP_ON = -1, Run_MSP_OFF = -1;
-int Run_FAN_ON = -1, Run_FAN_OFF = -1;
-int Run_OXI_ON = -1, Run_OXI_OFF = -1;
 
 // ==== Nút & thiết bị ====
 const int BUTTONS = 7;
@@ -79,14 +67,16 @@ const char* firebasePaths[BUTTONS] = {
 volatile bool buttonFlags[BUTTONS] = {false};
 bool status[BUTTONS] = {false};
 unsigned long lastDebounceTime[BUTTONS] = {0};
-const unsigned long debounceDelay = 50;
+const unsigned long debounceDelay = 50;         // chống dội
 
+// ==== Hàm kiểm tra lỗi ====
 void tokenStatusCallback(token_info_t info) {
   if (info.status == token_status_error) {
     Serial.println("Lỗi token: " + String(info.error.message.c_str()));
   }
 }
 
+// ==== Hàm connect wifi ====
 void connectWiFi() {
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.print("Kết nối WiFi");
@@ -97,6 +87,7 @@ void connectWiFi() {
   Serial.println("\nĐã kết nối WiFi!");
 }
 
+// ==== Hàm connect fire base ====
 void connectFirebase() {
   config.api_key = API_KEY;
   config.database_url = DATABASE_URL;
@@ -113,35 +104,7 @@ void connectFirebase() {
   Firebase.reconnectWiFi(true);
 }
 
-// ==== Tách chuỗi "HH:MM" ====
-void splitTime(String timeStr, int &hour, int &minute) {
-  hour = timeStr.substring(0, 2).toInt();
-  minute = timeStr.substring(3, 5).toInt();
-}
-
-// ==== Đọc thời gian từ Firebase ====
-void getFirebaseSchedule() {
-  if (Firebase.RTDB.getString(&fbdo_time, "/Daily/MSP/Start")) MSP_Start = fbdo_time.stringData();
-  if (Firebase.RTDB.getString(&fbdo_time, "/Daily/MSP/Stop"))  MSP_Stop  = fbdo_time.stringData();
-  if (Firebase.RTDB.getString(&fbdo_time, "/Daily/FAN/Start")) FAN_Start = fbdo_time.stringData();
-  if (Firebase.RTDB.getString(&fbdo_time, "/Daily/FAN/Stop"))  FAN_Stop  = fbdo_time.stringData();
-  if (Firebase.RTDB.getString(&fbdo_time, "/Daily/OXI/Start")) OXI_Start = fbdo_time.stringData();
-  if (Firebase.RTDB.getString(&fbdo_time, "/Daily/OXI/Stop"))  OXI_Stop  = fbdo_time.stringData();
-}
-
-void syncTime() {
-  configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov");
-  Serial.println("🕒 Chờ đồng bộ thời gian...");
-  
-  time_t now = time(nullptr);
-  while (now < 24 * 3600) {
-    delay(200);
-    now = time(nullptr);
-  }
-
-  Serial.println("✅ Đã đồng bộ thời gian.");
-}
-
+// ==== Hàm gửi giá trị nút nhấn ====
 void Send_data_button_by_firebase(const char* path, bool state) {
   if (Firebase.ready() && signUpOK) {
     String value = state ? "1" : "0";
@@ -153,6 +116,7 @@ void Send_data_button_by_firebase(const char* path, bool state) {
   }
 }
 
+// ==== Hàm đọc giá trị từ fire khi có bất ky thay đổi nào ====
 void Read_Data_By_Firebase() {
   if (Firebase.ready() && signUpOK) {
     for (int i = 0; i < BUTTONS; i++) {
@@ -176,6 +140,7 @@ void Read_Data_By_Firebase() {
   }
 }
 
+// ==== Hàm này dùng để lọc nhiễu kết quả của TDS ====
 int getMedianNum(int bArray[], int iFilterLen) {
   int bTab[iFilterLen];
   for (int i = 0; i < iFilterLen; i++)
@@ -197,6 +162,7 @@ int getMedianNum(int bArray[], int iFilterLen) {
   }
 }
 
+// ==== Hàm đọc TDS ====
 float TDS_Cal() {
   if (index_arr < SCOUNT) {
     arr[index_arr++] = analogRead(TDS_Sensor_pin);
@@ -215,6 +181,7 @@ float TDS_Cal() {
   }
 }
 
+// ==== Hàm đọc cảm biến nước ====
 float water_sensor() {
   digitalWrite(sensorPower, HIGH);
   delay(300);
@@ -223,16 +190,19 @@ float water_sensor() {
   return (val / 1450.0) * 100.0;
 }
 
+// ==== Hàm đọc pH ====
 float readPH() {
   int raw = analogRead(PH_PIN);
   float voltage = (raw / 4095.0) * 3.3;
   return 7 + ((2.50 - voltage) / 0.18);
 }
 
+// ==== Hàm đọc cảm biến ánh sáng ====
 int LDR_Cal() {
   return analogRead(LDR);
 }
 
+// ==== Hàm ĐK máy bơm vào theo điều kiện ====
 void controlMayBomVao(float level) {
   if (level < 20.0 && !may_bom_vao_on) {
     Serial.println("MAY_BOM_VAO ON (AUTO)");
@@ -250,6 +220,7 @@ void controlMayBomVao(float level) {
   }
 }
 
+// ==== Hàm ĐK máy bơm ra theo điều kiện ====
 void controlMayBomRa(float level) {
   if (level > 80.0 && !may_bom_ra_on) {
     Serial.println("MAY_BOM_RA ON (AUTO)");
@@ -267,6 +238,7 @@ void controlMayBomRa(float level) {
   }
 }
 
+// ==== Hàm ĐK LED theo điều kiện ====
 void controlDenAoNuoi(int ldr) {
   if (ldr > 2700 && !den_ao_nuoi_on) {
     Serial.println("DEN_AO_NUOI ON (AUTO)");
@@ -278,6 +250,43 @@ void controlDenAoNuoi(int ldr) {
     digitalWrite(LED, LOW);
     den_ao_nuoi_on = false;
     Send_data_button_by_firebase("Control/LED", false);
+  }
+}
+
+// Xử lý nút nhấn
+void Xu_ly_Button() {
+  for (int i = 0; i < BUTTONS; i++) {
+    if (buttonFlags[i] && (now - lastDebounceTime[i] > debounceDelay)) {
+      lastDebounceTime[i] = now;
+      buttonFlags[i] = false;
+      status[i] = !status[i];
+      digitalWrite(Control[i], status[i]);
+      Send_data_button_by_firebase(firebasePaths[i], status[i]);
+      Serial.printf("Nút %d nhấn => Thiết bị: %s\n", i + 1, status[i] ? "ON" : "OFF");
+    }
+  }
+}
+
+// Gửi dữ liệu cảm biến mỗi 5s
+void Send_Data() {
+  static unsigned long lastSensorTime = 0;
+  if (now - lastSensorTime > 5000) {
+    lastSensorTime = now;
+    float pH = readPH();
+    int light = LDR_Cal();
+    float water = water_sensor();
+    float TDS = TDS_Cal();
+
+    if (TDS >= 0) {
+      Firebase.RTDB.setString(&fbdo_sensor, "Sensor/pH", String(pH, 2));
+      Firebase.RTDB.setInt(&fbdo_sensor, "Sensor/Light", light);
+      Firebase.RTDB.setString(&fbdo_sensor, "Sensor/Water", String(water, 2));
+      Firebase.RTDB.setFloat(&fbdo_sensor, "Sensor/Tds", TDS);
+      Serial.printf("Sensor => pH: %.2f | Light: %d | Water: %.2f%% | Tds: %.2f\n", pH, light, water, TDS);
+    }
+    controlMayBomVao(water);
+    controlMayBomRa(water);
+    controlDenAoNuoi(light);
   }
 }
 
@@ -295,7 +304,6 @@ void setup() {
   Serial.begin(115200);
   connectWiFi();
   connectFirebase();
-  syncTime();
 
   for (int i = 0; i < BUTTONS; i++) {
     pinMode(buttonPins[i], INPUT_PULLUP);
@@ -318,119 +326,8 @@ void setup() {
 
 // ==== LOOP ====
 void loop() {
-  unsigned long now = millis();
-  unsigned long lastDailyTaskCheck = 0; // Thời điểm lần cuối kiểm tra Daily Task
-  const unsigned long dailyTaskInterval = 60000; // 60 giây
-
-  // Xử lý nút nhấn
-  for (int i = 0; i < BUTTONS; i++) {
-    if (buttonFlags[i] && (now - lastDebounceTime[i] > debounceDelay)) {
-      lastDebounceTime[i] = now;
-      buttonFlags[i] = false;
-      status[i] = !status[i];
-      digitalWrite(Control[i], status[i]);
-      Send_data_button_by_firebase(firebasePaths[i], status[i]);
-      Serial.printf("Nút %d nhấn => Thiết bị: %s\n", i + 1, status[i] ? "ON" : "OFF");
-    }
-  }
-
-  // Gửi dữ liệu cảm biến mỗi 5s
-  static unsigned long lastSensorTime = 0;
-  if (now - lastSensorTime > 5000) {
-    lastSensorTime = now;
-    float pH = readPH();
-    int light = LDR_Cal();
-    float water = water_sensor();
-    float TDS = TDS_Cal();
-
-    if (TDS >= 0) {
-      Firebase.RTDB.setString(&fbdo_sensor, "Sensor/pH", String(pH, 2));
-      Firebase.RTDB.setInt(&fbdo_sensor, "Sensor/Light", light);
-      Firebase.RTDB.setString(&fbdo_sensor, "Sensor/Water", String(water, 2));
-      Firebase.RTDB.setFloat(&fbdo_sensor, "Sensor/Tds", TDS);
-      Serial.printf("Sensor => pH: %.2f | Light: %d | Water: %.2f%% | Tds: %.2f\n", pH, light, water, TDS);
-    }
-    controlMayBomVao(water);
-    controlMayBomRa(water);
-    controlDenAoNuoi(light);
-  }
-
-  // Nhận trạng thái Firebase
+  now = millis();
+  Xu_ly_Button();
+  Send_Data();
   Read_Data_By_Firebase();
-
-  // ==== Hiển thị thời gian hiện tại ====
-  time_t timer = time(nullptr);
-  struct tm timeinfo;
-  localtime_r(&timer, &timeinfo);
-  Serial.printf("⏰ %02d:%02d:%02d | %02d-%02d-%04d\n",
-    timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
-    timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900);
-
-  // ==== Lấy thời gian điều khiển từ Firebase ====
-  getFirebaseSchedule();
-
-  // ==== Điều khiển MSP ====
-  int mspOnHour, mspOnMin, mspOffHour, mspOffMin;
-  splitTime(MSP_Start, mspOnHour, mspOnMin);
-  splitTime(MSP_Stop, mspOffHour, mspOffMin);
-
-  if (timeinfo.tm_hour == mspOnHour && timeinfo.tm_min == mspOnMin && Run_MSP_ON != timeinfo.tm_mday) {
-    digitalWrite(MSP, HIGH);
-    status[2] = true;
-    Send_data_button_by_firebase("Control/MSP", true);
-    Run_MSP_ON = timeinfo.tm_mday;
-    Serial.println("⏱️ MSP ON theo lịch");
-  }
-
-  if (timeinfo.tm_hour == mspOffHour && timeinfo.tm_min == mspOffMin && Run_MSP_OFF != timeinfo.tm_mday) {
-    digitalWrite(MSP, LOW);
-    status[2] = false;
-    Send_data_button_by_firebase("Control/MSP", false);
-    Run_MSP_OFF = timeinfo.tm_mday;
-    Serial.println("⏱️ MSP OFF theo lịch");
-  }
-
-  // ==== Điều khiển FAN ====
-  int fanOnHour, fanOnMin, fanOffHour, fanOffMin;
-  splitTime(FAN_Start, fanOnHour, fanOnMin);
-  splitTime(FAN_Stop, fanOffHour, fanOffMin);
-
-  if (timeinfo.tm_hour == fanOnHour && timeinfo.tm_min == fanOnMin && Run_FAN_ON != timeinfo.tm_mday) {
-    digitalWrite(FAN, HIGH);
-    status[0] = true;
-    Send_data_button_by_firebase("Control/FAN", true);
-    Run_FAN_ON = timeinfo.tm_mday;
-    Serial.println("⏱️ FAN ON theo lịch");
-  }
-
-  if (timeinfo.tm_hour == fanOffHour && timeinfo.tm_min == fanOffMin && Run_FAN_OFF != timeinfo.tm_mday) {
-    digitalWrite(FAN, LOW);
-    status[0] = false;
-    Send_data_button_by_firebase("Control/FAN", false);
-    Run_FAN_OFF = timeinfo.tm_mday;
-    Serial.println("⏱️ FAN OFF theo lịch");
-  }
-
-  // ==== Điều khiển OXI ====
-  int oxiOnHour, oxiOnMin, oxiOffHour, oxiOffMin;
-  splitTime(OXI_Start, oxiOnHour, oxiOnMin);
-  splitTime(OXI_Stop, oxiOffHour, oxiOffMin);
-
-  if (timeinfo.tm_hour == oxiOnHour && timeinfo.tm_min == oxiOnMin && Run_OXI_ON != timeinfo.tm_mday) {
-    digitalWrite(OXI, HIGH);
-    status[1] = true;
-    Send_data_button_by_firebase("Control/OXI", true);
-    Run_OXI_ON = timeinfo.tm_mday;
-    Serial.println("⏱️ OXI ON theo lịch");
-  }
-
-  if (timeinfo.tm_hour == oxiOffHour && timeinfo.tm_min == oxiOffMin && Run_OXI_OFF != timeinfo.tm_mday) {
-    digitalWrite(OXI, LOW);
-    status[1] = false;
-    Send_data_button_by_firebase("Control/OXI", false);
-    Run_OXI_OFF = timeinfo.tm_mday;
-    Serial.println("⏱️ OXI OFF theo lịch");
-  }
-
-  delay(1000); // Chờ 1 giây rồi lặp lại vòng loop
 }
