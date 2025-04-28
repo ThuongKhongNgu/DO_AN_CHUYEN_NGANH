@@ -2,32 +2,30 @@
 #include <Firebase_ESP_Client.h>
 #include <time.h>
 
-// ======== Thông tin WiFi =========
+// ======== Thông tin WiFi - Firebase =========
 #define WIFI_SSID "Trieu Ninh"
 #define WIFI_PASSWORD "12344321"
-
-// ======== Thông tin Firebase =========
 #define API_KEY "AIzaSyCicNauI0OCVjFMnEpFBqm0OjfhL8TcUNg"
 #define DATABASE_URL "https://nckh-8e369-default-rtdb.firebaseio.com/"
 
 // ======== Cấu hình chân kết nối =========
 // Nút nhấn
-#define SW1 23  // Nút điều khiển FAN
-#define SW2 22  // Nút điều khiển OXI
-#define SW3 21  // Nút điều khiển MSP
-#define SW4 19  // Nút điều khiển MRTA
-#define SW5 18  // Nút điều khiển MAY_BOM_VAO
-#define SW6 5   // Nút điều khiển MAY_BOM_RA
-#define SW7 17  // Nút điều khiển LED
+#define SW1 23
+#define SW2 22
+#define SW3 21
+#define SW4 19
+#define SW5 18
+#define SW6 5
+#define SW7 17
 
 // Thiết bị
-#define FAN 16          // Quạt
-#define OXI 4           // Máy sục khí
-#define MSP 0           // Máy sưởi/phun sương
-#define MRTA 2          // Máy rửa thùng ao
-#define MAY_BOM_VAO 15  // Máy bơm vào
-#define MAY_BOM_RA 32   // Máy bơm ra
-#define LED 33          // Đèn LED
+#define FAN 16         
+#define OXI 4          
+#define MSP 2          
+#define MRTA 15         
+#define MAY_BOM_VAO 26  
+#define MAY_BOM_RA 32   
+#define LED 33          
 
 // Cảm biến
 #define PH_PIN 25        // Chân cảm biến pH
@@ -53,21 +51,34 @@ unsigned long lastDebounceTime[7] = {0, 0, 0, 0, 0, 0, 0};
 // Trạng thái các thiết bị
 bool deviceState[7] = {false, false, false, false, false, false, false}; // FAN, OXI, MSP, MRTA, MAY_BOM_VAO, MAY_BOM_RA, LED
 
-int lastRunMinuteTask1 = -1;  // Phút cuối cùng đã bật quạt tự động
-int lastRunMinuteTask2 = -1;  // Phút cuối cùng đã tắt quạt tự động
-
+// Biến theo dõi phút cuối cùng đã chạy cho các thiết bị
+int lastRunMinuteTaskOn[3] = {-1, -1, -1};  // FAN, OXI, MSP (ON)
+int lastRunMinuteTaskOff[3] = {-1, -1, -1}; // FAN, OXI, MSP (OFF)
 unsigned long lastNTPUpdate = 0;        // Lần cuối cùng đồng bộ giờ
 const unsigned long ntpSyncInterval = 30 * 60 * 1000; // Đồng bộ NTP mỗi 30 phút
-
 unsigned long lastFirebaseScheduleRead = 0; // Thời điểm đọc lịch lần cuối
 unsigned long lastSensorRead = 0;           // Thời điểm đọc cảm biến lần cuối
+unsigned long lastDebugRead = 0;            // Thời điểm debug tín hiệu nút nhấn
 const unsigned long firebaseReadInterval = 10 * 1000; // Đọc mỗi 10 giây
+const unsigned long debugInterval = 500;    // Debug mỗi 500ms
 
-// Biến lưu thời gian từ Firebase
-int task1HourFirebase = 15;    // Giá trị mặc định ban đầu
-int task1MinuteFirebase = 15;
-int task2HourFirebase = 15;
-int task2MinuteFirebase = 16;
+// Biến lưu thời gian từ Firebase cho FAN
+int task1HourFirebase = 5;    
+int task1MinuteFirebase = 10;
+int task2HourFirebase = 9;
+int task2MinuteFirebase = 10;
+
+// Biến lưu thời gian từ Firebase cho OXI
+int task1HourFirebaseOXI = 5;
+int task1MinuteFirebaseOXI = 10;
+int task2HourFirebaseOXI = 5;
+int task2MinuteFirebaseOXI = 10;
+
+// Biến lưu thời gian từ Firebase cho MSP
+int task1HourFirebaseMSP = 6;
+int task1MinuteFirebaseMSP = 10;
+int task2HourFirebaseMSP = 6;
+int task2MinuteFirebaseMSP = 50;
 
 // ==== Phần dành cho TDS ====
 const float VREF = 3.3;
@@ -85,7 +96,7 @@ void IRAM_ATTR handleButtonInterrupt5() { buttonPressed[4] = true; }
 void IRAM_ATTR handleButtonInterrupt6() { buttonPressed[5] = true; }
 void IRAM_ATTR handleButtonInterrupt7() { buttonPressed[6] = true; }
 
-// ======== Hàm cảm biến =========
+// ======== Hàm lọt giá trị nhiễu cho cảm biến TDS =========
 int getMedianNum(int bArray[], int iFilterLen) {
   int bTab[iFilterLen];
   for (int i = 0; i < iFilterLen; i++)
@@ -106,6 +117,7 @@ int getMedianNum(int bArray[], int iFilterLen) {
   }
 }
 
+// ======== Hàm đọc cảm biến TDS =========
 float TDS_Cal() {
   if (index_arr < SCOUNT) {
     arr[index_arr++] = analogRead(TDS_Sensor_pin);
@@ -124,6 +136,7 @@ float TDS_Cal() {
   }
 }
 
+// ======== Hàm đọc cảm biến H2O =========
 float water_sensor() {
   digitalWrite(sensorPower, HIGH);
   delay(300);
@@ -132,25 +145,37 @@ float water_sensor() {
   return (val / 1450.0) * 100.0;
 }
 
+// ======== Hàm đọc cảm biến PH =========
 float readPH() {
   int raw = analogRead(PH_PIN);
   float voltage = (raw / 4095.0) * 3.3;
   return 7 + ((2.50 - voltage) / 0.18);
 }
 
+// ======== Hàm đọc cảm biến AS =========
 int LDR_Cal() {
   return analogRead(LDR);
+}
+
+// ======== Debug tín hiệu nút nhấn =========
+void debugButtonPins() {
+  int buttonPins[] = {SW1, SW2, SW3, SW4, SW5, SW6, SW7};
+  for (int i = 0; i < 7; i++) {
+    int buttonState = digitalRead(buttonPins[i]);
+    if (buttonState == LOW) { // Nút được nhấn (LOW do INPUT_PULLUP)
+      Serial.printf("SW%d (Pin %d) is pressed\n", i + 1, buttonPins[i]);
+    }
+  }
 }
 
 // ======== Hàm setup() =========
 void setup() {
   Serial.begin(115200);
 
-  // Cấu hình chân cho các thiết bị (OUTPUT)
   int devicePins[] = {FAN, OXI, MSP, MRTA, MAY_BOM_VAO, MAY_BOM_RA, LED};
   for (int i = 0; i < 7; i++) {
     pinMode(devicePins[i], OUTPUT);
-    digitalWrite(devicePins[i], LOW); // Mặc định tắt tất cả thiết bị
+    digitalWrite(devicePins[i], LOW);
   }
 
   // Cấu hình chân cho các nút nhấn (INPUT_PULLUP)
@@ -161,7 +186,7 @@ void setup() {
 
   // Cấu hình chân cho cảm biến
   pinMode(sensorPower, OUTPUT);
-  digitalWrite(sensorPower, LOW); // Tắt nguồn cảm biến nước mặc định
+  digitalWrite(sensorPower, LOW);
 
   // Cài đặt ngắt cho các nút nhấn
   attachInterrupt(digitalPinToInterrupt(SW1), handleButtonInterrupt1, FALLING);
@@ -195,7 +220,13 @@ void loop() {
     lastSensorRead = millis();
   }
 
-  handleScheduledTask();     // Kiểm tra lịch bật/tắt quạt
+  // Debug tín hiệu nút nhấn
+  if (millis() - lastDebugRead > debugInterval) {
+    debugButtonPins();
+    lastDebugRead = millis();
+  }
+
+  handleScheduledTask();     // Kiểm tra lịch bật/tắt cho FAN, OXI, MSP
 
   // Đồng bộ NTP
   if (millis() - lastNTPUpdate > ntpSyncInterval) {
@@ -227,9 +258,9 @@ void initFirebase() {
 
   // Đăng nhập ẩn danh
   if (Firebase.signUp(&config, &auth, "", "")) {
-    Serial.println("Firebase anonymous sign-up successful");
+    Serial.println("Connecting to Firebase");
   } else {
-    Serial.printf("Firebase anonymous sign-up failed, reason: %s\n", config.signer.signupError.message.c_str());
+    Serial.printf("Connected to Firebase, reason: %s\n", config.signer.signupError.message.c_str());
   }
 
   Firebase.begin(&config, &auth);
@@ -240,38 +271,103 @@ void initFirebase() {
 
 // ======== Đọc thời gian bật/tắt từ Firebase =========
 void readScheduleFromFirebase() {
-  // Đọc giờ và phút bật quạt (Task 1)
+  // Đọc lịch cho FAN
   if (Firebase.RTDB.getString(&fbdo, "Daily/FAN/hour_on")) {
     String hourOnStr = fbdo.stringData();
     task1HourFirebase = hourOnStr.toInt();
-    Serial.printf("Firebase: Task1 Hour (ON) = %d\n", task1HourFirebase);
+    Serial.printf("Firebase: FAN Hour (ON) = %d\n", task1HourFirebase);
   } else {
-    Serial.println("Failed to read Task1 Hour (ON) from Firebase");
+    Serial.println("Failed to read FAN Hour (ON)");
   }
 
   if (Firebase.RTDB.getString(&fbdo, "Daily/FAN/minute_on")) {
     String minuteOnStr = fbdo.stringData();
     task1MinuteFirebase = minuteOnStr.toInt();
-    Serial.printf("Firebase: Task1 Minute (ON) = %d\n", task1MinuteFirebase);
+    Serial.printf("Firebase: FAN Minute (ON) = %d\n", task1MinuteFirebase);
   } else {
-    Serial.println("Failed to read Task1 Minute (ON) from Firebase");
+    Serial.println("Failed to read FAN Minute (ON)");
   }
 
-  // Đọc giờ và phút tắt quạt (Task 2)
   if (Firebase.RTDB.getString(&fbdo, "Daily/FAN/hour_off")) {
     String hourOffStr = fbdo.stringData();
     task2HourFirebase = hourOffStr.toInt();
-    Serial.printf("Firebase: Task2 Hour (OFF) = %d\n", task2HourFirebase);
+    Serial.printf("Firebase: FAN Hour (OFF) = %d\n", task2HourFirebase);
   } else {
-    Serial.println("Failed to read Task2 Hour (OFF) from Firebase");
+    Serial.println("Failed to read FAN Hour (OFF)");
   }
 
   if (Firebase.RTDB.getString(&fbdo, "Daily/FAN/minute_off")) {
     String minuteOffStr = fbdo.stringData();
     task2MinuteFirebase = minuteOffStr.toInt();
-    Serial.printf("Firebase: Task2 Minute (OFF) = %d\n", task2MinuteFirebase);
+    Serial.printf("Firebase: FAN Minute (OFF) = %d\n", task2MinuteFirebase);
   } else {
-    Serial.println("Failed to read Task2 Minute (OFF) from Firebase");
+    Serial.println("Failed to read FAN Minute (OFF)");
+  }
+
+  // Đọc lịch cho OXI
+  if (Firebase.RTDB.getString(&fbdo, "Daily/OXI/hour_on")) {
+    String hourOnStr = fbdo.stringData();
+    task1HourFirebaseOXI = hourOnStr.toInt();
+    Serial.printf("Firebase: OXI Hour (ON) = %d\n", task1HourFirebaseOXI);
+  } else {
+    Serial.println("Failed to read OXI Hour (ON)");
+  }
+
+  if (Firebase.RTDB.getString(&fbdo, "Daily/OXI/minute_on")) {
+    String minuteOnStr = fbdo.stringData();
+    task1MinuteFirebaseOXI = minuteOnStr.toInt();
+    Serial.printf("Firebase: OXI Minute (ON) = %d\n", task1MinuteFirebaseOXI);
+  } else {
+    Serial.println("Failed to read OXI Minute (ON)");
+  }
+
+  if (Firebase.RTDB.getString(&fbdo, "Daily/OXI/hour_off")) {
+    String hourOffStr = fbdo.stringData();
+    task2HourFirebaseOXI = hourOffStr.toInt();
+    Serial.printf("Firebase: OXI Hour (OFF) = %d\n", task2HourFirebaseOXI);
+  } else {
+    Serial.println("Failed to read OXI Hour (OFF)");
+  }
+
+  if (Firebase.RTDB.getString(&fbdo, "Daily/OXI/minute_off")) {
+    String minuteOffStr = fbdo.stringData();
+    task2MinuteFirebaseOXI = minuteOffStr.toInt();
+    Serial.printf("Firebase: OXI Minute (OFF) = %d\n", task2MinuteFirebaseOXI);
+  } else {
+    Serial.println("Failed to read OXI Minute (OFF)");
+  }
+
+  // Đọc lịch cho MSP
+  if (Firebase.RTDB.getString(&fbdo, "Daily/MSP/hour_on")) {
+    String hourOnStr = fbdo.stringData();
+    task1HourFirebaseMSP = hourOnStr.toInt();
+    Serial.printf("Firebase: MSP Hour (ON) = %d\n", task1HourFirebaseMSP);
+  } else {
+    Serial.println("Failed to read MSP Hour (ON)");
+  }
+
+  if (Firebase.RTDB.getString(&fbdo, "Daily/MSP/minute_on")) {
+    String minuteOnStr = fbdo.stringData();
+    task1MinuteFirebaseMSP = minuteOnStr.toInt();
+    Serial.printf("Firebase: MSP Minute (ON) = %d\n", task1MinuteFirebaseMSP);
+  } else {
+    Serial.println("Failed to read MSP Minute (ON)");
+  }
+
+  if (Firebase.RTDB.getString(&fbdo, "Daily/MSP/hour_off")) {
+    String hourOffStr = fbdo.stringData();
+    task2HourFirebaseMSP = hourOffStr.toInt();
+    Serial.printf("Firebase: MSP Hour (OFF) = %d\n", task2HourFirebaseMSP);
+  } else {
+    Serial.println("Failed to read MSP Hour (OFF)");
+  }
+
+  if (Firebase.RTDB.getString(&fbdo, "Daily/MSP/minute_off")) {
+    String minuteOffStr = fbdo.stringData();
+    task2MinuteFirebaseMSP = minuteOffStr.toInt();
+    Serial.printf("Firebase: MSP Minute (OFF) = %d\n", task2MinuteFirebaseMSP);
+  } else {
+    Serial.println("Failed to read MSP Minute (OFF)");
   }
 }
 
@@ -285,29 +381,29 @@ void readAndSendSensors() {
 
   // Gửi giá trị lên Firebase với 2 số sau dấu phẩy
   if (phValue >= 0) {
-    String phStr = String(phValue, 2); // Giới hạn 2 số sau dấu phẩy
+    String phStr = String(phValue, 2);
     if (Firebase.RTDB.setString(&fbdo, "Sensor/PH", phStr)) {
       Serial.printf("PH Value: %.2f\n", phValue);
     } else {
-      Serial.println("Failed to send PH value to Firebase");
+      Serial.println("Failed to send PH value");
     }
   }
 
   if (tdsValue >= 0) {
-    String tdsStr = String(tdsValue, 2); // Giới hạn 2 số sau dấu phẩy
+    String tdsStr = String(tdsValue, 2);
     if (Firebase.RTDB.setString(&fbdo, "Sensor/TDS", tdsStr)) {
       Serial.printf("TDS Value: %.2f\n", tdsValue);
     } else {
-      Serial.println("Failed to send TDS value to Firebase");
+      Serial.println("Failed to send TDS value");
     }
   }
 
   if (waterLevel >= 0) {
-    String waterStr = String(waterLevel, 2); // Giới hạn 2 số sau dấu phẩy
+    String waterStr = String(waterLevel, 2);
     if (Firebase.RTDB.setString(&fbdo, "Sensor/Water", waterStr)) {
       Serial.printf("Water Level: %.2f%%\n", waterLevel);
     } else {
-      Serial.println("Failed to send Water Level to Firebase");
+      Serial.println("Failed to send Water Level");
     }
   }
 
@@ -315,7 +411,7 @@ void readAndSendSensors() {
     if (Firebase.RTDB.setInt(&fbdo, "Sensor/Light", lightValue)) {
       Serial.printf("Light Value: %d\n", lightValue);
     } else {
-      Serial.println("Failed to send Light value to Firebase");
+      Serial.println("Failed to send Light value");
     }
   }
 }
@@ -341,7 +437,7 @@ void handleButtons() {
         if (Firebase.RTDB.setString(&fbdo, devicePaths[i], value)) {
           Serial.printf("Button %d Pressed -> Updated %s to %s\n", i + 1, devicePaths[i].c_str(), value.c_str());
         } else {
-          Serial.println("Button Pressed -> Failed to update device state");
+          Serial.println("Button Pressed -> Failed");
         }
       }
     }
@@ -364,12 +460,12 @@ void readDeviceStatesFromFirebase() {
         Serial.printf("Firebase Updated -> %s set to %s\n", devicePaths[i].c_str(), remoteState.c_str());
       }
     } else {
-      Serial.printf("Failed to read %s state from Firebase\n", devicePaths[i].c_str());
+      Serial.printf("Failed to read %s state\n", devicePaths[i].c_str());
     }
   }
 }
 
-// ======== Xử lý bật/tắt quạt theo lịch =========
+// ======== Xử lý bật/tắt thiết bị theo lịch =========
 void handleScheduledTask() {
   time_t now = time(nullptr);
   struct tm timeinfo;
@@ -379,22 +475,58 @@ void handleScheduledTask() {
               timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
               timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday);
 
-  // Task 1: Bật quạt theo giờ từ Firebase
-  if (timeinfo.tm_hour == task1HourFirebase && timeinfo.tm_min == task1MinuteFirebase && lastRunMinuteTask1 != timeinfo.tm_min) {
+  // Task 1: Bật FAN theo giờ từ Firebase
+  if (timeinfo.tm_hour == task1HourFirebase && timeinfo.tm_min == task1MinuteFirebase && lastRunMinuteTaskOn[0] != timeinfo.tm_min) {
     deviceState[0] = true; // FAN là thiết bị 0
     digitalWrite(FAN, HIGH);
     Firebase.RTDB.setString(&fbdo, "Control/FAN", "1");
-    Serial.println("######### Bật quạt tự động theo lịch Firebase #########");
-    lastRunMinuteTask1 = timeinfo.tm_min;
+    Serial.println("######### Bật FAN tự động theo lịch Firebase #########");
+    lastRunMinuteTaskOn[0] = timeinfo.tm_min;
   }
 
-  // Task 2: Tắt quạt theo giờ từ Firebase
-  if (timeinfo.tm_hour == task2HourFirebase && timeinfo.tm_min == task2MinuteFirebase && lastRunMinuteTask2 != timeinfo.tm_min) {
+  // Task 2: Tắt FAN theo giờ từ Firebase
+  if (timeinfo.tm_hour == task2HourFirebase && timeinfo.tm_min == task2MinuteFirebase && lastRunMinuteTaskOff[0] != timeinfo.tm_min) {
     deviceState[0] = false;
     digitalWrite(FAN, LOW);
     Firebase.RTDB.setString(&fbdo, "Control/FAN", "0");
-    Serial.println("######### Tắt quạt tự động theo lịch Firebase #########");
-    lastRunMinuteTask2 = timeinfo.tm_min;
+    Serial.println("######### Tắt FAN tự động theo lịch Firebase #########");
+    lastRunMinuteTaskOff[0] = timeinfo.tm_min;
+  }
+
+  // Task 3: Bật OXI theo giờ từ Firebase
+  if (timeinfo.tm_hour == task1HourFirebaseOXI && timeinfo.tm_min == task1MinuteFirebaseOXI && lastRunMinuteTaskOn[1] != timeinfo.tm_min) {
+    deviceState[1] = true; // OXI là thiết bị 1
+    digitalWrite(OXI, HIGH);
+    Firebase.RTDB.setString(&fbdo, "Control/OXI", "1");
+    Serial.println("######### Bật OXI tự động theo lịch Firebase #########");
+    lastRunMinuteTaskOn[1] = timeinfo.tm_min;
+  }
+
+  // Task 4: Tắt OXI theo giờ từ Firebase
+  if (timeinfo.tm_hour == task2HourFirebaseOXI && timeinfo.tm_min == task2MinuteFirebaseOXI && lastRunMinuteTaskOff[1] != timeinfo.tm_min) {
+    deviceState[1] = false;
+    digitalWrite(OXI, LOW);
+    Firebase.RTDB.setString(&fbdo, "Control/OXI", "0");
+    Serial.println("######### Tắt OXI tự động theo lịch Firebase #########");
+    lastRunMinuteTaskOff[1] = timeinfo.tm_min;
+  }
+
+  // Task 5: Bật MSP theo giờ từ Firebase
+  if (timeinfo.tm_hour == task1HourFirebaseMSP && timeinfo.tm_min == task1MinuteFirebaseMSP && lastRunMinuteTaskOn[2] != timeinfo.tm_min) {
+    deviceState[2] = true; // MSP là thiết bị 2
+    digitalWrite(MSP, HIGH);
+    Firebase.RTDB.setString(&fbdo, "Control/MSP", "1");
+    Serial.println("######### Bật MSP tự động theo lịch Firebase #########");
+    lastRunMinuteTaskOn[2] = timeinfo.tm_min;
+  }
+
+  // Task 6: Tắt MSP theo giờ từ Firebase
+  if (timeinfo.tm_hour == task2HourFirebaseMSP && timeinfo.tm_min == task2MinuteFirebaseMSP && lastRunMinuteTaskOff[2] != timeinfo.tm_min) {
+    deviceState[2] = false;
+    digitalWrite(MSP, LOW);
+    Firebase.RTDB.setString(&fbdo, "Control/MSP", "0");
+    Serial.println("######### Tắt MSP tự động theo lịch Firebase #########");
+    lastRunMinuteTaskOff[2] = timeinfo.tm_min;
   }
 }
 
